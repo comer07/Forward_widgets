@@ -18,7 +18,7 @@ WidgetMetadata = {
   version: "1.0.0",
   requiredVersion: "0.0.1",
   description: "支持多个自定义弹幕服务器并发请求与去重合并",
-  author: "，",
+  author: "𝗰𝗼𝗺𝗲𝗿",
   site: "https://github.com/comer07/Forward_widgets",
   globalParams: [
     {
