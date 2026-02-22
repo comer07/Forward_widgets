@@ -106,15 +106,6 @@ function isValidServer(s) {
 }
 
 function getServersFromParams(params) {
-  params = params || {};
-  // 兼容历史配置：若旧版本存在 servers 文本列表，仍支持解析
-  const serverList = typeof params.servers === "string" ? params.servers : "";
-  const dynamicServers = serverList
-    .split(/[\n,;]+/)
-    .map(normalizeServer)
-    .filter(isValidServer);
-
-  // 当前配置主入口：server ~ server6
   const servers = [
     params.server,
     params.server2,
@@ -124,27 +115,19 @@ function getServersFromParams(params) {
     params.server6,
   ]
     .map(normalizeServer)
-    .filter(isValidServer)
-    .concat(dynamicServers);
+    .filter(isValidServer);
 
   // 去重
   return Array.from(new Set(servers));
 }
 
 async function safeGet(url, options) {
-  const timeoutMs = 8000;
-  let timer = null;
   try {
-    const timeoutPromise = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
-    });
-    const response = await Promise.race([Widget.http.get(url, options), timeoutPromise]);
-    if (timer) clearTimeout(timer);
+    const response = await Widget.http.get(url, options);
     if (!response) return { ok: false, error: "empty_response" };
     const data = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
     return { ok: true, data };
   } catch (e) {
-    if (timer) clearTimeout(timer);
     return { ok: false, error: e && e.message ? e.message : String(e) };
   }
 }
@@ -152,8 +135,7 @@ async function safeGet(url, options) {
 async function searchDanmu(params) {
   const { title, season } = params;
 
-  const queryTitle = typeof title === "string" ? title.trim() : title == null ? "" : String(title).trim();
-  const isMovieQuery = queryTitle.includes("电影") || queryTitle.includes("movie");
+  let queryTitle = title;
   const servers = getServersFromParams(params);
 
   // 没填任何 server，直接返回空
@@ -191,7 +173,7 @@ async function searchDanmu(params) {
       const nonMatchedAnimes = [];
 
       animes.forEach((anime) => {
-        if (matchSeason(anime, queryTitle, season) && !isMovieQuery) {
+        if (matchSeason(anime, queryTitle, season) && !(queryTitle.includes("电影") || queryTitle.includes("movie"))) {
           matchedAnimes.push(anime);
         } else {
           nonMatchedAnimes.push(anime);
@@ -206,7 +188,7 @@ async function searchDanmu(params) {
       const nonMatchedAnimes = [];
 
       animes.forEach((anime) => {
-        if (isMovieQuery) {
+        if (queryTitle.includes("电影") || queryTitle.includes("movie")) {
           matchedAnimes.push(anime);
         } else {
           nonMatchedAnimes.push(anime);
@@ -224,13 +206,13 @@ async function searchDanmu(params) {
 }
 
 function matchSeason(anime, queryTitle, season) {
-  if (!anime || typeof anime !== "object") return false;
-  const animeTitle = typeof anime.animeTitle === "string" ? anime.animeTitle : "";
+  console.log("start matchSeason: ", anime.animeTitle, queryTitle, season);
   let res = false;
-  if (animeTitle.includes(queryTitle)) {
-    const title = animeTitle.split("(")[0].trim();
+  if (anime.animeTitle.includes(queryTitle)) {
+    const title = anime.animeTitle.split("(")[0].trim();
     if (title.startsWith(queryTitle)) {
       const afterTitle = title.substring(queryTitle.length).trim();
+      console.log("start matchSeason afterTitle: ", afterTitle);
       if (afterTitle === "" && season.toString() === "1") {
         res = true;
       }
@@ -246,6 +228,7 @@ function matchSeason(anime, queryTitle, season) {
       }
     }
   }
+  console.log("start matchSeason res: ", res);
   return res;
 }
 
