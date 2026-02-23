@@ -87,6 +87,7 @@ WidgetMetadata = {
 };
 
 const SOURCE_KEY = "forward_danmu_source_map";
+const REQUEST_TIMEOUT_MS = 4000;
 
 function normalizeServer(s) {
   if (!s || typeof s !== "string") return "";
@@ -128,7 +129,30 @@ async function saveSource(id, server) {
   try {
     let map = await Widget.storage.get(SOURCE_KEY);
     map = map ? JSON.parse(map) : {};
-    map[String(id)] = server;
+    const key = String(id);
+    const oldVal = map[key];
+    const list = Array.isArray(oldVal) ? oldVal : oldVal ? [oldVal] : [];
+    if (!list.includes(server)) list.push(server);
+    map[key] = list;
+    await Widget.storage.set(SOURCE_KEY, JSON.stringify(map));
+  } catch (e) {}
+}
+
+async function saveSourcesBatch(items) {
+  if (!Array.isArray(items) || items.length === 0) return;
+  try {
+    let map = await Widget.storage.get(SOURCE_KEY);
+    map = map ? JSON.parse(map) : {};
+    for (const item of items) {
+      if (!item) continue;
+      const { id, server } = item;
+      if (id === undefined || id === null || !server) continue;
+      const key = String(id);
+      const oldVal = map[key];
+      const list = Array.isArray(oldVal) ? oldVal : oldVal ? [oldVal] : [];
+      if (!list.includes(server)) list.push(server);
+      map[key] = list;
+    }
     await Widget.storage.set(SOURCE_KEY, JSON.stringify(map));
   } catch (e) {}
 }
@@ -139,7 +163,9 @@ async function getSource(id) {
     const map = await Widget.storage.get(SOURCE_KEY);
     if (!map) return null;
     const parsed = JSON.parse(map);
-    return parsed[String(id)] || null;
+    const val = parsed[String(id)];
+    if (!val) return null;
+    return Array.isArray(val) ? val : [val];
   } catch (e) {
     return null;
   }
@@ -147,7 +173,13 @@ async function getSource(id) {
 
 async function safeGet(url, options) {
   try {
-    const response = await Widget.http.get(url, options);
+    const timeoutPromise = new Promise((resolve) =>
+      setTimeout(() => resolve({ __timeout: true }), REQUEST_TIMEOUT_MS)
+    );
+    const response = await Promise.race([Widget.http.get(url, options), timeoutPromise]);
+    if (response && response.__timeout) {
+      return { ok: false, error: "timeout" };
+    }
     if (!response) return { ok: false, error: "empty_response" };
     const data = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
     return { ok: true, data };
@@ -231,6 +263,7 @@ async function searchDanmu(params) {
 
   // 合并所有服务器的 animes（忽略失败的）
   let animes = [];
+  const sourceWrites = [];
   for (const item of results) {
     const r = item.result;
     if (!r.ok) continue;
@@ -239,10 +272,11 @@ async function searchDanmu(params) {
       for (const anime of data.animes) {
         const animeWithSource = { ...anime, sourceServer: item.server };
         animes.push(animeWithSource);
-        await saveSource(anime.animeId, item.server);
+        sourceWrites.push({ id: anime.animeId, server: item.server });
       }
     }
   }
+  await saveSourcesBatch(sourceWrites);
 
   // 原有排序逻辑尽量保持不变
   if (animes.length > 0) {
@@ -410,8 +444,11 @@ function convertChineseNumber(chineseNumber) {
 
 async function getDetailById(params) {
   const { animeId } = params;
-  const routedServer = params.sourceServer || (await getSource(animeId));
-  const servers = routedServer ? [normalizeServer(routedServer)] : getServersFromParams(params);
+  const routedServers = params.sourceServer
+    ? [normalizeServer(params.sourceServer)]
+    : ((await getSource(animeId)) || []).map(normalizeServer);
+  const fallbackServers = getServersFromParams(params);
+  const servers = Array.from(new Set([...routedServers, ...fallbackServers].filter(Boolean)));
 
   if (!servers.length) return [];
 
@@ -420,43 +457,32 @@ async function getDetailById(params) {
     "User-Agent": "ForwardWidgets/1.0.0",
   };
 
-  // 全部请求，失败的忽略
-  const tasks = servers.map((server) =>
-    safeGet(`${server}/api/v2/bangumi/${animeId}`, { headers })
-  );
-
-  const results = await Promise.all(tasks);
-
-  // 合并 episodes（轻量去重：按 episodeId 或 id 或 name + episodeNumber）
-  const episodes = [];
-  const seen = new Set();
-
-  results.forEach((r, idx) => {
-    if (!r.ok) return;
+  // 依次回退：优先命中源，失败再试其它源；命中后直接返回，避免跨源混合导致 movie -> tv_series
+  for (const server of servers) {
+    const r = await safeGet(`${server}/api/v2/bangumi/${animeId}`, { headers });
+    if (!r.ok) continue;
     const data = r.data;
-    if (!data || !data.bangumi || !Array.isArray(data.bangumi.episodes)) return;
+    if (!data || !data.bangumi || !Array.isArray(data.bangumi.episodes) || data.bangumi.episodes.length === 0) {
+      continue;
+    }
+    const episodes = data.bangumi.episodes;
+    await saveSourcesBatch(
+      episodes.map((ep) => ({
+        id: ep.episodeId !== undefined ? ep.episodeId : ep.id,
+        server,
+      }))
+    );
+    return episodes;
+  }
 
-    data.bangumi.episodes.forEach((ep) => {
-      const key =
-        (ep.episodeId !== undefined ? `eid:${ep.episodeId}` : "") ||
-        (ep.id !== undefined ? `id:${ep.id}` : "") ||
-        `mix:${ep.episodeTitle || ""}#${ep.episodeNumber || ""}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      if (servers[idx]) {
-        saveSource(ep.episodeId !== undefined ? ep.episodeId : ep.id, servers[idx]);
-      }
-      episodes.push(ep);
-    });
-  });
-
-  return episodes;
+  return [];
 }
 
 async function getCommentsById(params) {
   const { commentId } = params;
-  const routedServer = await getSource(commentId);
-  const servers = routedServer ? [normalizeServer(routedServer)] : getServersFromParams(params);
+  const routedServers = ((await getSource(commentId)) || []).map(normalizeServer);
+  const fallbackServers = getServersFromParams(params);
+  const servers = Array.from(new Set([...routedServers, ...fallbackServers].filter(Boolean)));
 
   if (!commentId) return null;
   if (!servers.length) return null;
@@ -468,7 +494,10 @@ async function getCommentsById(params) {
 
   // 全部请求，失败的忽略
   const tasks = servers.map((server) =>
-    safeGet(`${server}/api/v2/comment/${commentId}?withRelated=true&chConvert=1`, { headers })
+    safeGet(`${server}/api/v2/comment/${commentId}?withRelated=true&chConvert=1`, { headers }).then((r) => ({
+      server,
+      result: r,
+    }))
   );
 
   const results = await Promise.all(tasks);
@@ -478,7 +507,8 @@ async function getCommentsById(params) {
   const danmakus = [];
   const seen = new Set();
 
-  results.forEach((r) => {
+  results.forEach((item) => {
+    const r = item.result;
     if (!r.ok) return;
     const data = r.data;
     if (!data) return;
@@ -496,8 +526,8 @@ async function getCommentsById(params) {
 
     list.forEach((d) => {
       const key =
-        (d.cid !== undefined ? `cid:${d.cid}` : "") ||
-        (d.id !== undefined ? `id:${d.id}` : "") ||
+        (d.cid !== undefined ? `s:${item.server}|cid:${d.cid}` : "") ||
+        (d.id !== undefined ? `s:${item.server}|id:${d.id}` : "") ||
         `mix:${d.p || d.time || ""}|${d.m || d.text || ""}`;
       if (seen.has(key)) return;
       seen.add(key);
