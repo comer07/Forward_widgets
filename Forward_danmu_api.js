@@ -25,37 +25,67 @@ WidgetMetadata = {
       name: "server",
       title: "自定义服务器",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
     {
       name: "server2",
       title: "自定义服务器2",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
     {
       name: "server3",
       title: "自定义服务器3",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
     {
       name: "server4",
       title: "自定义服务器4",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
     {
       name: "server5",
       title: "自定义服务器5",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
     {
       name: "server6",
       title: "自定义服务器6",
       type: "input",
-      placeholder: "https://{domain}/{token}",
+      placeholders: [
+        {
+          title: "示例danmu_api",
+          value: "https://{domain}/{token}",
+        },
+      ],
     },
   ],
   modules: [
@@ -342,4 +372,3 @@ async function getCommentsById(params) {
   else base.danmakus = danmakus;
   return base;
 }
-
