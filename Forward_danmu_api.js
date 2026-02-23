@@ -325,6 +325,20 @@ async function getDetailById(params) {
     });
   });
 
+  // 电影场景强制单集，避免多源返回多个“第1集”导致被识别为 tv_series
+  if (episodes.length > 1 && isMovieRequest(params, params && params.title)) {
+    let picked = null;
+    for (const ep of episodes) {
+      const n = ep && ep.episodeNumber !== undefined && ep.episodeNumber !== null ? String(ep.episodeNumber) : "";
+      if (n === "1") {
+        picked = ep;
+        break;
+      }
+    }
+    if (!picked) picked = episodes[0];
+    return picked ? [picked] : [];
+  }
+
   return episodes;
 }
 
