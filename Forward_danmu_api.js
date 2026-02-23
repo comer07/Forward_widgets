@@ -15,7 +15,7 @@
 WidgetMetadata = {
   id: "Forward_danmu_api",
   title: "多源弹幕聚合",
-  version: "1.0.1",
+  version: "1.0.2",
   requiredVersion: "0.0.1",
   description: "支持多个自定义弹幕服务器并发请求与去重合并",
   author: "𝗰𝗼𝗺𝗲𝗿",
@@ -86,6 +86,8 @@ WidgetMetadata = {
   ],
 };
 
+const SOURCE_KEY = "forward_danmu_source_map";
+
 function normalizeServer(s) {
   if (!s || typeof s !== "string") return "";
   let x = s.trim();
@@ -121,6 +123,28 @@ function getServersFromParams(params) {
   return Array.from(new Set(servers));
 }
 
+async function saveSource(id, server) {
+  if (id === undefined || id === null || !server) return;
+  try {
+    let map = await Widget.storage.get(SOURCE_KEY);
+    map = map ? JSON.parse(map) : {};
+    map[String(id)] = server;
+    await Widget.storage.set(SOURCE_KEY, JSON.stringify(map));
+  } catch (e) {}
+}
+
+async function getSource(id) {
+  if (id === undefined || id === null) return null;
+  try {
+    const map = await Widget.storage.get(SOURCE_KEY);
+    if (!map) return null;
+    const parsed = JSON.parse(map);
+    return parsed[String(id)] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function safeGet(url, options) {
   try {
     const response = await Widget.http.get(url, options);
@@ -150,20 +174,28 @@ async function searchDanmu(params) {
 
   // 并发请求：所有填写了的 server 都会请求
   const tasks = servers.map((server) =>
-    safeGet(`${server}/api/v2/search/anime?keyword=${encodeURIComponent(queryTitle)}`, { headers })
+    safeGet(`${server}/api/v2/search/anime?keyword=${encodeURIComponent(queryTitle)}`, { headers }).then((r) => ({
+      server,
+      result: r,
+    }))
   );
 
   const results = await Promise.all(tasks);
 
   // 合并所有服务器的 animes（忽略失败的）
   let animes = [];
-  results.forEach((r) => {
-    if (!r.ok) return;
+  for (const item of results) {
+    const r = item.result;
+    if (!r.ok) continue;
     const data = r.data;
     if (data && data.success && Array.isArray(data.animes) && data.animes.length > 0) {
-      animes = animes.concat(data.animes);
+      for (const anime of data.animes) {
+        const animeWithSource = { ...anime, sourceServer: item.server };
+        animes.push(animeWithSource);
+        await saveSource(anime.animeId, item.server);
+      }
     }
-  });
+  }
 
   // 原有排序逻辑尽量保持不变
   if (animes.length > 0) {
@@ -314,7 +346,8 @@ function convertChineseNumber(chineseNumber) {
 
 async function getDetailById(params) {
   const { animeId } = params;
-  const servers = getServersFromParams(params);
+  const routedServer = params.sourceServer || (await getSource(animeId));
+  const servers = routedServer ? [normalizeServer(routedServer)] : getServersFromParams(params);
 
   if (!servers.length) return [];
 
@@ -334,7 +367,7 @@ async function getDetailById(params) {
   const episodes = [];
   const seen = new Set();
 
-  results.forEach((r) => {
+  results.forEach((r, idx) => {
     if (!r.ok) return;
     const data = r.data;
     if (!data || !data.bangumi || !Array.isArray(data.bangumi.episodes)) return;
@@ -346,6 +379,9 @@ async function getDetailById(params) {
         `mix:${ep.episodeTitle || ""}#${ep.episodeNumber || ""}`;
       if (seen.has(key)) return;
       seen.add(key);
+      if (servers[idx]) {
+        saveSource(ep.episodeId !== undefined ? ep.episodeId : ep.id, servers[idx]);
+      }
       episodes.push(ep);
     });
   });
@@ -355,7 +391,8 @@ async function getDetailById(params) {
 
 async function getCommentsById(params) {
   const { commentId } = params;
-  const servers = getServersFromParams(params);
+  const routedServer = await getSource(commentId);
+  const servers = routedServer ? [normalizeServer(routedServer)] : getServersFromParams(params);
 
   if (!commentId) return null;
   if (!servers.length) return null;
