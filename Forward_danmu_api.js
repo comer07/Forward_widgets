@@ -156,6 +156,53 @@ async function safeGet(url, options) {
   }
 }
 
+function isMovieQuery(params, queryTitle) {
+  const t = (params && params.type ? String(params.type) : "").toLowerCase();
+  if (t === "movie" || t === "film" || t.includes("movie")) return true;
+  const noSeason = !(params && params.season !== undefined && params.season !== null && String(params.season).trim() !== "");
+  const noEpisode = !(params && params.episode !== undefined && params.episode !== null && String(params.episode).trim() !== "");
+  if (noSeason && noEpisode) return true;
+  const q = (queryTitle || "").toLowerCase();
+  return q.includes("电影") || q.includes("movie") || q.includes("film");
+}
+
+function isSeriesLikeByTitle(title) {
+  const t = (title || "").toLowerCase();
+  return (
+    /第\s*[一二三四五六七八九十\d]+\s*季/.test(title || "") ||
+    /第\s*\d+\s*部/.test(title || "") ||
+    /\bs\d+\b/.test(t) ||
+    /\bseason\s*\d+\b/.test(t) ||
+    /\bep(isode)?\s*\d+\b/.test(t) ||
+    /第\s*[一二三四五六七八九十\d]+\s*[集话]/.test(title || "")
+  );
+}
+
+function isMovieLikeAnime(anime) {
+  const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
+  const typeText = [
+    anime && anime.type !== undefined ? String(anime.type) : "",
+    anime && anime.animeType !== undefined ? String(anime.animeType) : "",
+    anime && anime.typeDescription !== undefined ? String(anime.typeDescription) : "",
+    anime && anime.category !== undefined ? String(anime.category) : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (typeText.includes("movie") || typeText.includes("film") || typeText.includes("电影")) return true;
+  if (typeText.includes("tv") || typeText.includes("series") || typeText.includes("剧集") || typeText.includes("番剧")) return false;
+
+  if (/剧场版|电影版|電影版|movie|film/i.test(title)) return true;
+  if (isSeriesLikeByTitle(title)) return false;
+  return false;
+}
+
+function isNeutralMovieCandidate(anime) {
+  const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
+  if (!title) return false;
+  return !isSeriesLikeByTitle(title);
+}
+
 async function searchDanmu(params) {
   const { title, season } = params;
 
@@ -199,6 +246,23 @@ async function searchDanmu(params) {
 
   // 原有排序逻辑尽量保持不变
   if (animes.length > 0) {
+    // 电影请求：优先电影候选，避免同名剧集（第1集/第X季）被排前导致识别成 tv_series
+    if (isMovieQuery(params, queryTitle)) {
+      const movieLike = [];
+      const neutral = [];
+      const seriesLike = [];
+      animes.forEach((anime) => {
+        if (isMovieLikeAnime(anime)) {
+          movieLike.push(anime);
+        } else if (isNeutralMovieCandidate(anime)) {
+          neutral.push(anime);
+        } else {
+          seriesLike.push(anime);
+        }
+      });
+      animes = [...movieLike, ...neutral, ...seriesLike];
+    }
+
     if (season) {
       // order by season
       const matchedAnimes = [];
