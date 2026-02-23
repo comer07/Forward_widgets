@@ -15,7 +15,7 @@
 WidgetMetadata = {
   id: "Forward_danmu_api",
   title: "多源弹幕聚合",
-  version: "1.0.2",
+  version: "1.0.3",
   requiredVersion: "0.0.1",
   description: "支持多个自定义弹幕服务器并发请求与去重合并",
   author: "𝗰𝗼𝗺𝗲𝗿",
