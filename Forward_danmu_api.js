@@ -151,13 +151,18 @@ function toTypeKey(raw) {
   const text = (raw || "").toString().trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (!text) return "";
   const hasWord = (re) => re.test(text);
+  const isMovie = text.includes("电影") || text.includes("剧场版") || hasWord(/(?:^|_)(movie|film|theatrical)(?:_|$)/);
+  const isDocumentary = text.includes("纪录片") || hasWord(/(?:^|_)documentary(?:_|$)/);
+  const isVariety = text.includes("综艺") || hasWord(/(?:^|_)(variety|reality)(?:_|$)/);
+  const isAnime = text.includes("动漫") || text.includes("动画") || text.includes("番剧") || hasWord(/(?:^|_)(anime|animation|bangumi)(?:_|$)/);
+  const isTv = text.includes("电视剧") || text.includes("剧集") || hasWord(/(?:^|_)(tv_series|series|drama|tv)(?:_|$)/);
 
-  // 先判定更具体的类型，避免被宽泛的 tv 命中。
-  if (text.includes("电影") || hasWord(/(?:^|_)(movie|film|theatrical)(?:_|$)/)) return "movie";
-  if (text.includes("纪录片") || hasWord(/(?:^|_)documentary(?:_|$)/)) return "documentary";
-  if (text.includes("综艺") || hasWord(/(?:^|_)(variety|reality)(?:_|$)/)) return "variety";
-  if (text.includes("动漫") || text.includes("动画") || text.includes("番剧") || hasWord(/(?:^|_)(anime|animation|bangumi)(?:_|$)/)) return "anime";
-  if (text.includes("电视剧") || text.includes("剧集") || hasWord(/(?:^|_)(tv_series|series|drama|tv)(?:_|$)/)) return "tv";
+  // 电影优先，避免被 tv/tv_series 误覆盖。
+  if (isMovie) return "movie";
+  if (isDocumentary) return "documentary";
+  if (isVariety) return "variety";
+  if (isAnime) return "anime";
+  if (isTv) return "tv";
   return text;
 }
 
@@ -178,17 +183,23 @@ function detectTypeKeyFromAnime(anime) {
   const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
   const bracketType = (title.match(/【([^】]+)】/) || [null, ""])[1];
   const candidates = [
-    anime.type,
+    bracketType,
     anime.typeDescription,
     anime.mediaType,
-    bracketType,
+    anime.type,
+    title,
   ];
+
+  // 先做电影优先扫描，只要任一字段命中电影就判 movie
+  for (const c of candidates) {
+    if (toTypeKey(c) === "movie") return "movie";
+  }
+  // 再按其余类型顺序回退
   for (const c of candidates) {
     const key = toTypeKey(c);
-    if (key) return key;
+    if (key && key !== "movie") return key;
   }
-  // 条目本身无类型时，尝试从标题词汇推断
-  return toTypeKey(title);
+  return "";
 }
 
 async function saveAnimeMeta(animeId, typeKey) {
