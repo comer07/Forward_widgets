@@ -15,7 +15,7 @@
 WidgetMetadata = {
   id: "Forward_danmu_api",
   title: "多源弹幕聚合",
-  version: "1.0.3",
+  version: "1.0.4",
   requiredVersion: "0.0.1",
   description: "支持多个自定义弹幕服务器并发请求与去重合并",
   author: "comer",
@@ -113,6 +113,18 @@ WidgetMetadata = {
   ],
 };
 
+const ANIME_META_KEY = "forward_danmu_anime_meta_map";
+const MEDIA_TYPE_ZH_MAP = {
+  movie: "电影",
+  tv: "电视剧",
+  drama: "电视剧",
+  tv_series: "电视剧",
+  series: "电视剧",
+  anime: "动漫",
+  variety: "综艺",
+  documentary: "纪录片",
+};
+
 function normalizeServer(s) {
   if (!s || typeof s !== "string") return "";
   let x = s.trim();
@@ -135,6 +147,71 @@ function getServersFromParams(params) {
   return Array.from(new Set(servers));
 }
 
+function toTypeKey(raw) {
+  const text = (raw || "").toString().trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!text) return "";
+  const hasWord = (re) => re.test(text);
+
+  // 先判定更具体的类型，避免被宽泛的 tv 命中。
+  if (text.includes("电影") || hasWord(/(?:^|_)(movie|film|theatrical)(?:_|$)/)) return "movie";
+  if (text.includes("纪录片") || hasWord(/(?:^|_)documentary(?:_|$)/)) return "documentary";
+  if (text.includes("综艺") || hasWord(/(?:^|_)(variety|reality)(?:_|$)/)) return "variety";
+  if (text.includes("动漫") || text.includes("动画") || text.includes("番剧") || hasWord(/(?:^|_)(anime|animation|bangumi)(?:_|$)/)) return "anime";
+  if (text.includes("电视剧") || text.includes("剧集") || hasWord(/(?:^|_)(tv_series|series|drama|tv)(?:_|$)/)) return "tv";
+  return text;
+}
+
+function typeKeyToLabel(typeKey) {
+  return MEDIA_TYPE_ZH_MAP[typeKey] || "";
+}
+
+function formatAnimeTitleWithType(title, typeLabel) {
+  if (!title || !typeLabel) return title;
+  const t = String(title);
+  if (/【[^】]*】/.test(t)) return t.replace(/【[^】]*】/, `【${typeLabel}】`);
+  if (/\[[^\]]+\]/.test(t)) return t.replace(/\[[^\]]+\]/, `【${typeLabel}】`);
+  return `${t}【${typeLabel}】`;
+}
+
+function detectTypeKeyFromAnime(anime, params) {
+  if (!anime) return "";
+  const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
+  const bracketType = (title.match(/【([^】]+)】/) || [null, ""])[1];
+  const candidates = [
+    anime.type,
+    anime.typeDescription,
+    anime.mediaType,
+    bracketType,
+    params && params.type,
+  ];
+  for (const c of candidates) {
+    const key = toTypeKey(c);
+    if (key) return key;
+  }
+  return "";
+}
+
+async function saveAnimeMeta(animeId, typeKey) {
+  if (animeId === undefined || animeId === null || animeId === "" || !typeKey) return;
+  try {
+    const raw = await Widget.storage.get(ANIME_META_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    map[String(animeId)] = { typeKey };
+    await Widget.storage.set(ANIME_META_KEY, JSON.stringify(map));
+  } catch (e) {}
+}
+
+async function getAnimeMeta(animeId) {
+  if (animeId === undefined || animeId === null || animeId === "") return null;
+  try {
+    const raw = await Widget.storage.get(ANIME_META_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map[String(animeId)] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function safeGet(url, options) {
   try {
     const response = await Widget.http.get(url, options);
@@ -147,10 +224,10 @@ async function safeGet(url, options) {
 }
 
 function isMovieRequest(params, title) {
-  const t = (params && params.type ? String(params.type) : "").toLowerCase();
-  if (t === "movie" || t.includes("movie")) return true;
+  const t = toTypeKey(params && params.type ? String(params.type) : "");
+  if (t === "movie") return true;
   const q = (title || "").toLowerCase();
-  return q.includes("电影") || q.includes("movie");
+  return q.includes("电影") || q.includes("movie") || q.includes("film");
 }
 
 function isSeriesLikeTitle(title) {
@@ -186,13 +263,30 @@ async function searchDanmu(params) {
   const results = await Promise.all(tasks);
 
   let animes = [];
+  const saveMetaTasks = [];
   results.forEach((r) => {
     if (!r.ok) return;
     const data = r.data;
     if (data && data.success && Array.isArray(data.animes) && data.animes.length > 0) {
-      animes = animes.concat(data.animes);
+      data.animes.forEach((anime) => {
+        const typeKey = detectTypeKeyFromAnime(anime, params);
+        const typeLabel = typeKeyToLabel(typeKey);
+        const transformed = { ...anime };
+        if (typeLabel) {
+          transformed.type = typeLabel;
+          transformed.typeDescription = typeLabel;
+          if (transformed.animeTitle) transformed.animeTitle = formatAnimeTitleWithType(transformed.animeTitle, typeLabel);
+        }
+        animes.push(transformed);
+
+        const idForMeta = transformed.animeId !== undefined ? transformed.animeId : transformed.bangumiId;
+        if (idForMeta !== undefined && typeKey) {
+          saveMetaTasks.push(saveAnimeMeta(idForMeta, typeKey));
+        }
+      });
     }
   });
+  if (saveMetaTasks.length > 0) await Promise.all(saveMetaTasks);
 
   if (animes.length > 0) {
     if (isMovieRequest(params, queryTitle)) {
@@ -326,7 +420,12 @@ async function getDetailById(params) {
   });
 
   // 电影场景强制单集，避免多源返回多个“第1集”导致被识别为 tv_series
-  if (episodes.length > 1 && isMovieRequest(params, params && params.title)) {
+  let movieRequested = isMovieRequest(params, params && params.title);
+  if (!movieRequested) {
+    const meta = await getAnimeMeta(animeId);
+    if (meta && meta.typeKey === "movie") movieRequested = true;
+  }
+  if (episodes.length > 1 && movieRequested) {
     let picked = null;
     for (const ep of episodes) {
       const n = ep && ep.episodeNumber !== undefined && ep.episodeNumber !== null ? String(ep.episodeNumber) : "";
