@@ -114,6 +114,7 @@ WidgetMetadata = {
 };
 
 const ANIME_META_KEY = "forward_danmu_anime_meta_map";
+const SOURCE_KEY = "forward_danmu_source_map";
 const MEDIA_TYPE_ZH_MAP = {
   movie: "电影",
   tv: "电视剧",
@@ -178,6 +179,15 @@ function formatAnimeTitleWithType(title, typeLabel) {
   return `${t}【${typeLabel}】`;
 }
 
+function applyTypeLabel(anime, typeKey) {
+  if (!anime || !typeKey) return anime;
+  const typeLabel = typeKeyToLabel(typeKey);
+  if (!typeLabel) return anime;
+  const next = { ...anime, type: typeLabel, typeDescription: typeLabel };
+  if (next.animeTitle) next.animeTitle = formatAnimeTitleWithType(next.animeTitle, typeLabel);
+  return next;
+}
+
 function detectTypeKeyFromAnime(anime) {
   if (!anime) return "";
   const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
@@ -218,6 +228,27 @@ async function getAnimeMeta(animeId) {
     const raw = await Widget.storage.get(ANIME_META_KEY);
     const map = raw ? JSON.parse(raw) : {};
     return map[String(animeId)] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveSource(id, url) {
+  if (id === undefined || id === null || id === "" || !url) return;
+  try {
+    const raw = await Widget.storage.get(SOURCE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    map[String(id)] = String(url);
+    await Widget.storage.set(SOURCE_KEY, JSON.stringify(map));
+  } catch (e) {}
+}
+
+async function getSource(id) {
+  if (id === undefined || id === null || id === "") return null;
+  try {
+    const raw = await Widget.storage.get(SOURCE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map[String(id)] || null;
   } catch (e) {
     return null;
   }
@@ -269,35 +300,61 @@ async function searchDanmu(params) {
   };
 
   const tasks = servers.map((server) =>
-    safeGet(`${server}/api/v2/search/anime?keyword=${encodeURIComponent(queryTitle)}`, { headers })
+    safeGet(`${server}/api/v2/search/anime?keyword=${encodeURIComponent(queryTitle)}`, { headers }).then((result) => ({
+      server,
+      result,
+    }))
   );
   const results = await Promise.all(tasks);
 
   let animes = [];
   const saveMetaTasks = [];
-  results.forEach((r) => {
+  results.forEach((entry) => {
+    const r = entry.result;
     if (!r.ok) return;
     const data = r.data;
     if (data && data.success && Array.isArray(data.animes) && data.animes.length > 0) {
       data.animes.forEach((anime) => {
         const typeKey = detectTypeKeyFromAnime(anime);
-        const typeLabel = typeKeyToLabel(typeKey);
-        const transformed = { ...anime };
-        if (typeLabel) {
-          transformed.type = typeLabel;
-          transformed.typeDescription = typeLabel;
-          if (transformed.animeTitle) transformed.animeTitle = formatAnimeTitleWithType(transformed.animeTitle, typeLabel);
-        }
+        let transformed = { ...anime, __server: entry.server };
+        transformed = applyTypeLabel(transformed, typeKey);
         animes.push(transformed);
 
         const idForMeta = transformed.animeId !== undefined ? transformed.animeId : transformed.bangumiId;
         if (idForMeta !== undefined && typeKey) {
           saveMetaTasks.push(saveAnimeMeta(idForMeta, typeKey));
         }
+        if (idForMeta !== undefined) {
+          saveMetaTasks.push(saveSource(idForMeta, entry.server));
+        }
       });
     }
   });
   if (saveMetaTasks.length > 0) await Promise.all(saveMetaTasks);
+
+  // 无季信息时，对“看起来像电影但被标成剧集”的结果做一次详情校正：
+  // 若详情只有1集，则按电影展示。
+  if (!season && animes.length > 0) {
+    const refineTasks = animes.slice(0, 10).map(async (anime, idx) => {
+      const titleText = anime && anime.animeTitle ? String(anime.animeTitle) : "";
+      if (isSeriesLikeTitle(titleText)) return;
+
+      const currentType = toTypeKey(anime.type || anime.typeDescription);
+      if (currentType && currentType !== "tv") return;
+
+      const animeId = anime && anime.animeId !== undefined ? anime.animeId : anime && anime.bangumiId;
+      const server = anime && anime.__server ? String(anime.__server) : "";
+      if (!animeId || !server) return;
+
+      const detail = await safeGet(`${server}/api/v2/bangumi/${animeId}`, { headers });
+      if (!detail.ok || !detail.data || !detail.data.bangumi || !Array.isArray(detail.data.bangumi.episodes)) return;
+      if (detail.data.bangumi.episodes.length === 1) {
+        animes[idx] = applyTypeLabel(animes[idx], "movie");
+        await saveAnimeMeta(animeId, "movie");
+      }
+    });
+    await Promise.all(refineTasks);
+  }
 
   if (animes.length > 0) {
     if (isMovieRequest(params, queryTitle)) {
@@ -341,7 +398,13 @@ async function searchDanmu(params) {
     }
   }
 
-  return { animes };
+  return {
+    animes: animes.map((a) => {
+      const x = { ...a };
+      delete x.__server;
+      return x;
+    }),
+  };
 }
 
 function matchSeason(anime, queryTitle, season) {
@@ -408,27 +471,28 @@ async function getDetailById(params) {
     "User-Agent": "ForwardWidgets/1.0.0",
   };
 
-  const tasks = servers.map((server) => safeGet(`${server}/api/v2/bangumi/${animeId}`, { headers }));
-  const results = await Promise.all(tasks);
+  const preferredServer = (await getSource(animeId)) || null;
+  const requestOrder = preferredServer
+    ? [preferredServer].concat(servers.filter((s) => s !== preferredServer))
+    : servers.slice();
 
-  const episodes = [];
-  const seen = new Set();
-
-  results.forEach((r) => {
-    if (!r.ok) return;
+  let episodes = [];
+  for (const server of requestOrder) {
+    const r = await safeGet(`${server}/api/v2/bangumi/${animeId}`, { headers });
+    if (!r.ok) continue;
     const data = r.data;
-    if (!data || !data.bangumi || !Array.isArray(data.bangumi.episodes)) return;
+    if (!data || !data.bangumi || !Array.isArray(data.bangumi.episodes)) continue;
 
-    data.bangumi.episodes.forEach((ep) => {
-      const key =
-        (ep.episodeId !== undefined ? `eid:${ep.episodeId}` : "") ||
-        (ep.id !== undefined ? `id:${ep.id}` : "") ||
-        `mix:${ep.episodeTitle || ""}#${ep.episodeNumber || ""}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      episodes.push(ep);
-    });
-  });
+    episodes = data.bangumi.episodes.slice();
+    for (const ep of episodes) {
+      if (ep && ep.episodeId !== undefined && ep.episodeId !== null && ep.episodeId !== "") {
+        await saveSource(ep.episodeId, server);
+      }
+    }
+    await saveSource(animeId, server);
+    break;
+  }
+  if (!episodes.length) return [];
 
   // 电影场景强制单集，避免多源返回多个“第1集”导致被识别为 tv_series
   let movieRequested = isMovieRequest(params, params && params.title);
@@ -463,7 +527,11 @@ async function getCommentsById(params) {
     "User-Agent": "ForwardWidgets/1.0.0",
   };
 
-  const tasks = servers.map((server) =>
+  const preferredServer = (await getSource(commentId)) || null;
+  const requestOrder = preferredServer
+    ? [preferredServer].concat(servers.filter((s) => s !== preferredServer))
+    : servers.slice();
+  const tasks = requestOrder.map((server) =>
     safeGet(`${server}/api/v2/comment/${commentId}?withRelated=true&chConvert=1`, { headers }).then((r) => ({
       server,
       result: r,
