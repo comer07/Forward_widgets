@@ -166,10 +166,13 @@ function isSeriesLikeTitle(title) {
 }
 
 async function searchDanmu(params) {
-  const { title, season } = params;
+  params = params || {};
+  const title = typeof params.title === "string" ? params.title : "";
+  const season = params.season;
   const queryTitle = title;
   const servers = getServersFromParams(params);
 
+  if (!queryTitle) return { animes: [] };
   if (!servers.length) return { animes: [] };
 
   const headers = {
@@ -289,7 +292,9 @@ function convertChineseNumber(chineseNumber) {
 }
 
 async function getDetailById(params) {
-  const { animeId } = params;
+  params = params || {};
+  const animeId = params.animeId;
+  if (animeId === undefined || animeId === null || animeId === "") return [];
   const servers = getServersFromParams(params);
   if (!servers.length) return [];
 
@@ -324,9 +329,10 @@ async function getDetailById(params) {
 }
 
 async function getCommentsById(params) {
-  const { commentId } = params;
+  params = params || {};
+  const commentId = params.commentId;
   const servers = getServersFromParams(params);
-  if (!commentId || !servers.length) return null;
+  if (!commentId || !servers.length) return { comments: [] };
 
   const headers = {
     "Content-Type": "application/json",
@@ -366,7 +372,7 @@ async function getCommentsById(params) {
     });
   });
 
-  if (!base) return null;
+  if (!base) return { comments: [] };
   if (Array.isArray(base.danmakus)) base.danmakus = danmakus;
   else if (Array.isArray(base.comments)) base.comments = danmakus;
   else base.danmakus = danmakus;
