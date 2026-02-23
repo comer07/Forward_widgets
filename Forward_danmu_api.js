@@ -173,7 +173,7 @@ function formatAnimeTitleWithType(title, typeLabel) {
   return `${t}【${typeLabel}】`;
 }
 
-function detectTypeKeyFromAnime(anime, params) {
+function detectTypeKeyFromAnime(anime) {
   if (!anime) return "";
   const title = anime && anime.animeTitle ? String(anime.animeTitle) : "";
   const bracketType = (title.match(/【([^】]+)】/) || [null, ""])[1];
@@ -182,13 +182,13 @@ function detectTypeKeyFromAnime(anime, params) {
     anime.typeDescription,
     anime.mediaType,
     bracketType,
-    params && params.type,
   ];
   for (const c of candidates) {
     const key = toTypeKey(c);
     if (key) return key;
   }
-  return "";
+  // 条目本身无类型时，尝试从标题词汇推断
+  return toTypeKey(title);
 }
 
 async function saveAnimeMeta(animeId, typeKey) {
@@ -269,7 +269,7 @@ async function searchDanmu(params) {
     const data = r.data;
     if (data && data.success && Array.isArray(data.animes) && data.animes.length > 0) {
       data.animes.forEach((anime) => {
-        const typeKey = detectTypeKeyFromAnime(anime, params);
+        const typeKey = detectTypeKeyFromAnime(anime);
         const typeLabel = typeKeyToLabel(typeKey);
         const transformed = { ...anime };
         if (typeLabel) {
